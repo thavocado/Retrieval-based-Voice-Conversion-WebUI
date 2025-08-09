@@ -588,6 +588,7 @@ if __name__ == "__main__":
                             ],
                             "threhold": values["threhold"],
                             "pitch": values["pitch"],
+                            "formant": values["formant"],
                             "rms_mix_rate": values["rms_mix_rate"],
                             "index_rate": values["index_rate"],
                             # "device_latency": values["device_latency"],
