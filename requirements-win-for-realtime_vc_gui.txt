@@ -21,7 +21,7 @@ scipy
 SoundFile
 tensorboard
 tqdm
-wave
+# wave  # Removed - Python has built-in wave module, PyPI package causes issues
 PySimpleGUI
 sounddevice<0.5.0
 gradio

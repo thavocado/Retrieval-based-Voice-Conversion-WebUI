@@ -5,6 +5,15 @@ import shutil
 
 load_dotenv()
 
+# Patch torch.load for PyTorch 2.6+ compatibility
+import torch
+_original_torch_load = torch.load
+def patched_torch_load(*args, **kwargs):
+    if 'weights_only' not in kwargs:
+        kwargs['weights_only'] = False
+    return _original_torch_load(*args, **kwargs)
+torch.load = patched_torch_load
+
 os.environ["OMP_NUM_THREADS"] = "4"
 if sys.platform == "darwin":
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
