@@ -56,6 +56,36 @@ def phase_vocoder(a, b, fade_out, fade_in):
     return result
 
 
+def create_window(window_type, size, device, dtype=torch.float32):
+    """Create different window functions for crossfading"""
+    if window_type == "sine_squared":
+        # Original implementation
+        fade_in = torch.sin(0.5 * np.pi * torch.linspace(0.0, 1.0, steps=size, device=device, dtype=dtype)) ** 2
+    elif window_type == "cosine":
+        # Cosine window
+        fade_in = (1 - torch.cos(np.pi * torch.linspace(0.0, 1.0, steps=size, device=device, dtype=dtype))) / 2
+    elif window_type == "hann":
+        # Hann window
+        fade_in = 0.5 * (1 - torch.cos(2 * np.pi * torch.linspace(0.0, 1.0, steps=size, device=device, dtype=dtype)))
+    elif window_type == "tukey":
+        # Tukey window with alpha=0.5
+        alpha = 0.5
+        x = torch.linspace(0.0, 1.0, steps=size, device=device, dtype=dtype)
+        fade_in = torch.ones_like(x)
+        # Left taper
+        mask = x < alpha/2
+        fade_in[mask] = 0.5 * (1 + torch.cos(2*np.pi/alpha * (x[mask] - alpha/2)))
+        # Right taper  
+        mask = x > (1 - alpha/2)
+        fade_in[mask] = 0.5 * (1 + torch.cos(2*np.pi/alpha * (x[mask] - 1 + alpha/2)))
+    else:
+        # Default to sine squared
+        fade_in = torch.sin(0.5 * np.pi * torch.linspace(0.0, 1.0, steps=size, device=device, dtype=dtype)) ** 2
+    
+    fade_out = 1 - fade_in
+    return fade_in, fade_out
+
+
 class Harvest(multiprocessing.Process):
     def __init__(self, inp_q, opt_q):
         multiprocessing.Process.__init__(self)
@@ -142,6 +172,10 @@ if __name__ == "__main__":
             self.wasapi_exclusive: bool = False
             self.sg_input_device: str = ""
             self.sg_output_device: str = ""
+            # New advanced settings
+            self.window_func: str = "cosine"  # cosine (best), sine_squared, hann, tukey
+            self.sola_search_mult: float = 1.0  # 0.5 to 2.0
+            self.crossfade_ratio: float = 0.5  # 0.3 to 0.7
 
     class GUI:
         def __init__(self) -> None:
@@ -252,6 +286,10 @@ if __name__ == "__main__":
             self.gui_config.sg_wasapi_exclusive = data.get("sg_wasapi_exclusive", False)
             self.gui_config.sg_input_device = data.get("sg_input_device", "")
             self.gui_config.sg_output_device = data.get("sg_output_device", "")
+            # Load new advanced settings
+            self.gui_config.window_func = data.get("window_func", "cosine")
+            self.gui_config.sola_search_mult = data.get("sola_search_mult", 1.0)
+            self.gui_config.crossfade_ratio = data.get("crossfade_ratio", 0.5)
             
             sg.theme("LightBlue3")
             layout = [
@@ -496,6 +534,35 @@ if __name__ == "__main__":
                                 ),
                             ],
                             [
+                                sg.Text(i18n("窗函数类型")),
+                                sg.Combo(
+                                    ["cosine", "sine_squared", "hann", "tukey"],
+                                    key="window_func",
+                                    default_value=data.get("window_func", "cosine"),
+                                    enable_events=True,
+                                ),
+                                sg.Text(i18n("SOLA搜索倍数")),
+                                sg.Slider(
+                                    range=(0.5, 2.0),
+                                    key="sola_search_mult",
+                                    resolution=0.1,
+                                    orientation="h",
+                                    default_value=data.get("sola_search_mult", 1.0),
+                                    enable_events=True,
+                                ),
+                            ],
+                            [
+                                sg.Text(i18n("交叉淡化比例")),
+                                sg.Slider(
+                                    range=(0.3, 0.7),
+                                    key="crossfade_ratio",
+                                    resolution=0.05,
+                                    orientation="h",
+                                    default_value=data.get("crossfade_ratio", 0.5),
+                                    enable_events=True,
+                                ),
+                            ],
+                            [
                                 sg.Text(i18n("额外推理时长")),
                                 sg.Slider(
                                     range=(0.05, 5.00),
@@ -629,6 +696,10 @@ if __name__ == "__main__":
                                     values["fcpe"],
                                 ].index(True)
                             ],
+                            # New advanced settings
+                            "window_func": values["window_func"],
+                            "sola_search_mult": values["sola_search_mult"],
+                            "crossfade_ratio": values["crossfade_ratio"],
                         }
                         with open("configs/inuse/config.json", "w") as j:
                             json.dump(settings, j)
@@ -733,6 +804,10 @@ if __name__ == "__main__":
                     values["fcpe"],
                 ].index(True)
             ]
+            # Set new advanced settings
+            self.gui_config.window_func = values["window_func"]
+            self.gui_config.sola_search_mult = values["sola_search_mult"]
+            self.gui_config.crossfade_ratio = values["crossfade_ratio"]
             return True
 
         def start_vc(self):
@@ -778,7 +853,12 @@ if __name__ == "__main__":
                 * self.zc
             )
             self.sola_buffer_frame = min(self.crossfade_frame, 4 * self.zc)
-            self.sola_search_frame = self.zc
+            # Ensure sola_search_frame is properly aligned and non-zero
+            self.sola_search_frame = max(1, int(self.zc * self.gui_config.sola_search_mult))
+            # Make sure it's divisible by zc for proper alignment
+            self.sola_search_frame = (self.sola_search_frame // self.zc) * self.zc
+            if self.sola_search_frame == 0:
+                self.sola_search_frame = self.zc  # Fallback to default
             self.extra_frame = (
                 int(
                     np.round(
@@ -813,21 +893,21 @@ if __name__ == "__main__":
             self.return_length = (
                 self.block_frame + self.sola_buffer_frame + self.sola_search_frame
             ) // self.zc
-            self.fade_in_window: torch.Tensor = (
-                torch.sin(
-                    0.5
-                    * np.pi
-                    * torch.linspace(
-                        0.0,
-                        1.0,
-                        steps=self.sola_buffer_frame,
-                        device=self.config.device,
-                        dtype=torch.float32,
-                    )
-                )
-                ** 2
+            # Use the new window function creator
+            self.fade_in_window, self.fade_out_window = create_window(
+                self.gui_config.window_func,
+                self.sola_buffer_frame,
+                self.config.device,
+                torch.float32
             )
-            self.fade_out_window: torch.Tensor = 1 - self.fade_in_window
+            
+            # Apply crossfade ratio adjustment with stronger effect
+            if self.gui_config.crossfade_ratio != 0.5:
+                ratio = self.gui_config.crossfade_ratio
+                # Use power of 4 instead of 2 for more pronounced effect
+                self.fade_in_window = self.fade_in_window ** (4 * (1 - ratio))
+                self.fade_out_window = self.fade_out_window ** (4 * ratio)
+            
             self.resampler = tat.Resample(
                 orig_freq=self.gui_config.samplerate,
                 new_freq=16000,
@@ -1026,6 +1106,7 @@ if __name__ == "__main__":
             self.sola_buffer[:] = infer_wav[
                 self.block_frame : self.block_frame + self.sola_buffer_frame
             ]
+            
             outdata[:] = (
                 infer_wav[: self.block_frame]
                 .repeat(self.gui_config.channels, 1)

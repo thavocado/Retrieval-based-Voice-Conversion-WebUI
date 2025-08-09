@@ -134,5 +134,8 @@
     "音频设备": "Audio device",
     "音高算法": "pitch detection algorithm",
     "额外推理时长": "Extra inference time",
-    "性别因子/声线粗细": "Gender Factor/Voice Thickness"
+    "性别因子/声线粗细": "Gender Factor/Voice Thickness",
+    "窗函数类型": "Window Function Type",
+    "SOLA搜索倍数": "SOLA Search Multiplier",
+    "交叉淡化比例": "Crossfade Balance"
 }
