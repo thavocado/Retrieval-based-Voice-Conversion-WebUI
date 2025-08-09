@@ -146,5 +146,13 @@
     "平滑窗口": "Smoothing Window",
     "特征缓冲倍数": "Feature Buffer Multiplier",
     "共振峰保留": "Formant Preservation",
-    "谐波增强": "Harmonic Enhancement"
+    "谐波增强": "Harmonic Enhancement",
+    "Monster Mode - 极端声音处理": "Monster Mode - Extreme Voice Handling",
+    "启用Monster Mode": "Enable Monster Mode",
+    "软削波保护": "Soft Clipping Protection",
+    "周期性阈值": "Periodicity Threshold",
+    "覆盖音高范围": "Override Pitch Range",
+    "最小Hz": "Min Hz",
+    "最大Hz": "Max Hz",
+    "噪声门阈值(dB)": "Noise Gate Threshold (dB)"
 }

@@ -71,8 +71,15 @@ class RVC:
             self.device = config.device if config else torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.f0_up_key = key
             self.formant_shift = gui_config.formant if gui_config and hasattr(gui_config, 'formant') else 0
-            self.f0_min = 50
-            self.f0_max = 1100
+            
+            # Apply pitch range override if Monster Mode is enabled
+            if gui_config and hasattr(gui_config, 'monster_mode') and gui_config.monster_mode and hasattr(gui_config, 'pitch_range_override') and gui_config.pitch_range_override:
+                self.f0_min = gui_config.pitch_min_override if hasattr(gui_config, 'pitch_min_override') else 30
+                self.f0_max = gui_config.pitch_max_override if hasattr(gui_config, 'pitch_max_override') else 2000
+            else:
+                self.f0_min = 50
+                self.f0_max = 1100
+            
             self.f0_mel_min = 1127 * np.log(1 + self.f0_min / 700)
             self.f0_mel_max = 1127 * np.log(1 + self.f0_max / 700)
             self.n_cpu = n_cpu
@@ -284,7 +291,13 @@ class RVC:
         )
         pd = torchcrepe.filter.median(pd, 3)
         f0 = torchcrepe.filter.mean(f0, 3)
-        f0[pd < 0.1] = 0
+        
+        # Use configurable periodicity threshold for Monster Mode
+        periodicity_threshold = 0.1
+        if self.gui_config and hasattr(self.gui_config, 'monster_mode') and self.gui_config.monster_mode:
+            periodicity_threshold = self.gui_config.periodicity_threshold if hasattr(self.gui_config, 'periodicity_threshold') else 0.1
+        
+        f0[pd < periodicity_threshold] = 0
         f0 *= pow(2, f0_up_key / 12)
         return self.get_f0_post(f0)
 
@@ -334,6 +347,13 @@ class RVC:
         if self.net_g is None:
             printt("Model not loaded, returning silence")
             return np.zeros(return_length, dtype=np.float32)
+        
+        # Monster Mode: Add safety check for extreme input
+        if self.gui_config and hasattr(self.gui_config, 'monster_mode') and self.gui_config.monster_mode:
+            # Check for NaN or Inf in input
+            if torch.isnan(input_wav).any() or torch.isinf(input_wav).any():
+                printt("Warning: NaN or Inf detected in input, replacing with zeros")
+                input_wav = torch.nan_to_num(input_wav, nan=0.0, posinf=1.0, neginf=-1.0)
             
         t1 = ttime()
         
@@ -392,9 +412,29 @@ class RVC:
             f0_extractor_frame = block_frame_16k + 800
             if f0method == "rmvpe":
                 f0_extractor_frame = 5120 * ((f0_extractor_frame - 1) // 5120 + 1) - 160
-            pitch, pitchf = self.get_f0(
-                input_wav[-f0_extractor_frame:], self.f0_up_key - self.formant_shift, self.n_cpu, f0method
-            )
+            try:
+                pitch, pitchf = self.get_f0(
+                    input_wav[-f0_extractor_frame:], self.f0_up_key - self.formant_shift, self.n_cpu, f0method
+                )
+                
+                # Monster Mode: Handle pitch detection failures gracefully
+                if self.gui_config and hasattr(self.gui_config, 'monster_mode') and self.gui_config.monster_mode:
+                    # Check if pitch detection completely failed (all zeros)
+                    if torch.all(pitch == 0):
+                        printt("Warning: Pitch detection failed, using fallback pitch")
+                        # Use a neutral pitch value
+                        pitch = torch.ones_like(pitch) * 128  # Middle of the range
+                        pitchf = torch.ones_like(pitchf) * 440.0  # A4 frequency
+                
+            except Exception as e:
+                printt(f"Pitch detection error: {e}")
+                if self.gui_config and hasattr(self.gui_config, 'monster_mode') and self.gui_config.monster_mode:
+                    # Fallback to neutral pitch
+                    pitch = torch.ones(4, device=self.device, dtype=torch.long) * 128
+                    pitchf = torch.ones(4, device=self.device, dtype=torch.float32) * 440.0
+                else:
+                    raise
+            
             shift = block_frame_16k // 160
             self.cache_pitch[:-shift] = self.cache_pitch[shift:].clone()
             self.cache_pitchf[:-shift] = self.cache_pitchf[shift:].clone()

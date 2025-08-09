@@ -182,6 +182,14 @@ if __name__ == "__main__":
             self.pitch_smoothing: bool = False  # Enable pitch smoothing
             self.pitch_smooth_window: int = 5  # Smoothing window size
             self.gpu_optimize: bool = False  # GPU memory optimization
+            # Monster Mode settings for extreme vocals
+            self.monster_mode: bool = False  # Enable handling of inhuman sounds
+            self.periodicity_threshold: float = 0.1  # Lower = more aggressive pitch detection
+            self.pitch_range_override: bool = False  # Override default pitch range
+            self.pitch_min_override: int = 30  # Extended min pitch (Hz)
+            self.pitch_max_override: int = 2000  # Extended max pitch (Hz)
+            self.noise_gate_threshold: float = -40  # dB threshold for noise gating
+            self.clip_protection: bool = False  # Soft clipping for harsh sounds
 
     class GUI:
         def __init__(self) -> None:
@@ -657,6 +665,71 @@ if __name__ == "__main__":
                     ),
                 ],
                 [
+                    sg.Frame(
+                        title=i18n("Monster Mode - 极端声音处理"),
+                        layout=[
+                            [
+                                sg.Checkbox(
+                                    i18n("启用Monster Mode"),
+                                    key="monster_mode",
+                                    default=data.get("monster_mode", False),
+                                    enable_events=True,
+                                ),
+                                sg.Checkbox(
+                                    i18n("软削波保护"),
+                                    key="clip_protection",
+                                    default=data.get("clip_protection", False),
+                                    enable_events=True,
+                                ),
+                            ],
+                            [
+                                sg.Text(i18n("周期性阈值")),
+                                sg.Slider(
+                                    range=(0.01, 0.3),
+                                    key="periodicity_threshold",
+                                    resolution=0.01,
+                                    orientation="h",
+                                    default_value=data.get("periodicity_threshold", 0.1),
+                                    enable_events=True,
+                                ),
+                            ],
+                            [
+                                sg.Checkbox(
+                                    i18n("覆盖音高范围"),
+                                    key="pitch_range_override",
+                                    default=data.get("pitch_range_override", False),
+                                    enable_events=True,
+                                ),
+                                sg.Text(i18n("最小Hz")),
+                                sg.Input(
+                                    key="pitch_min_override",
+                                    default_text=str(data.get("pitch_min_override", 30)),
+                                    size=(5, 1),
+                                    enable_events=True,
+                                ),
+                                sg.Text(i18n("最大Hz")),
+                                sg.Input(
+                                    key="pitch_max_override",
+                                    default_text=str(data.get("pitch_max_override", 2000)),
+                                    size=(5, 1),
+                                    enable_events=True,
+                                ),
+                            ],
+                            [
+                                sg.Text(i18n("噪声门阈值(dB)")),
+                                sg.Slider(
+                                    range=(-60, -20),
+                                    key="noise_gate_threshold",
+                                    resolution=1,
+                                    orientation="h",
+                                    default_value=data.get("noise_gate_threshold", -40),
+                                    enable_events=True,
+                                ),
+                            ],
+                        ],
+                    ),
+                ],
+                [
                     sg.Button(i18n("开始音频转换"), key="start_vc"),
                     sg.Button(i18n("停止音频转换"), key="stop_vc"),
                     sg.Radio(
@@ -758,6 +831,14 @@ if __name__ == "__main__":
                             "pitch_smoothing": values["pitch_smoothing"],
                             "pitch_smooth_window": values["pitch_smooth_window"],
                             "gpu_optimize": values["gpu_optimize"],
+                            # Monster Mode settings
+                            "monster_mode": values["monster_mode"],
+                            "periodicity_threshold": values["periodicity_threshold"],
+                            "pitch_range_override": values["pitch_range_override"],
+                            "pitch_min_override": values["pitch_min_override"],
+                            "pitch_max_override": values["pitch_max_override"],
+                            "noise_gate_threshold": values["noise_gate_threshold"],
+                            "clip_protection": values["clip_protection"],
                         }
                         with open("configs/inuse/config.json", "w") as j:
                             json.dump(settings, j)
@@ -872,6 +953,18 @@ if __name__ == "__main__":
             self.gui_config.pitch_smoothing = values["pitch_smoothing"]
             self.gui_config.pitch_smooth_window = values["pitch_smooth_window"]
             self.gui_config.gpu_optimize = values["gpu_optimize"]
+            # Set Monster Mode settings
+            self.gui_config.monster_mode = values["monster_mode"]
+            self.gui_config.periodicity_threshold = values["periodicity_threshold"]
+            self.gui_config.pitch_range_override = values["pitch_range_override"]
+            try:
+                self.gui_config.pitch_min_override = int(values["pitch_min_override"])
+                self.gui_config.pitch_max_override = int(values["pitch_max_override"])
+            except:
+                self.gui_config.pitch_min_override = 30
+                self.gui_config.pitch_max_override = 2000
+            self.gui_config.noise_gate_threshold = values["noise_gate_threshold"]
+            self.gui_config.clip_protection = values["clip_protection"]
             return True
 
         def start_vc(self):
@@ -1056,6 +1149,32 @@ if __name__ == "__main__":
             self.input_wav[: -self.block_frame] = self.input_wav[
                 self.block_frame :
             ].clone()
+            
+            # Apply Monster Mode pre-processing if enabled
+            if self.gui_config.monster_mode:
+                # Apply soft clipping to prevent harsh distortion
+                if self.gui_config.clip_protection:
+                    # Soft clip using tanh (smoother than hard clipping)
+                    clip_threshold = 0.95
+                    indata = np.tanh(indata / clip_threshold) * clip_threshold
+                
+                # Apply noise gate for extreme low-level noise
+                if self.gui_config.noise_gate_threshold > -60:
+                    # Calculate RMS in dB
+                    rms = librosa.feature.rms(y=indata, frame_length=512, hop_length=128)[0]
+                    db = librosa.amplitude_to_db(rms, ref=1.0)
+                    # Apply gate
+                    gate_mask = db > self.gui_config.noise_gate_threshold
+                    # Smooth the gate to avoid clicks
+                    from scipy.ndimage import binary_dilation
+                    gate_mask = binary_dilation(gate_mask, iterations=2)
+                    # Apply with fade
+                    for i in range(len(gate_mask)):
+                        if not gate_mask[i]:
+                            start_idx = i * 128
+                            end_idx = min((i + 1) * 128, len(indata))
+                            indata[start_idx:end_idx] *= 0.1  # Soft mute instead of hard cut
+            
             self.input_wav[-indata.shape[0] :] = torch.from_numpy(indata).to(
                 self.config.device
             )
