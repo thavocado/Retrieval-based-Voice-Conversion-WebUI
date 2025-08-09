@@ -232,6 +232,27 @@ if __name__ == "__main__":
         def launcher(self):
             data = self.load()
             self.config.use_jit = False  # data.get("use_jit", self.config.use_jit)
+            
+            # Initialize gui_config from loaded data
+            self.gui_config.pth_path = data.get("pth_path", "")
+            self.gui_config.index_path = data.get("index_path", "")
+            self.gui_config.pitch = data.get("pitch", 0)
+            self.gui_config.formant = data.get("formant", 0.0)
+            self.gui_config.sr_type = data.get("sr_type", "sr_model")
+            self.gui_config.threhold = data.get("threhold", -60)
+            self.gui_config.rms_mix_rate = data.get("rms_mix_rate", 0.0)
+            self.gui_config.index_rate = data.get("index_rate", 0.0)
+            self.gui_config.block_time = data.get("block_time", 0.25)
+            self.gui_config.crossfade_time = data.get("crossfade_length", 0.05)
+            self.gui_config.extra_time = data.get("extra_time", 2.5)
+            self.gui_config.I_noise_reduce = data.get("I_noise_reduce", False)
+            self.gui_config.O_noise_reduce = data.get("O_noise_reduce", False)
+            self.gui_config.use_pv = data.get("use_pv", False)
+            self.gui_config.sg_hostapi = data.get("sg_hostapi", self.hostapis[0] if self.hostapis else "")
+            self.gui_config.sg_wasapi_exclusive = data.get("sg_wasapi_exclusive", False)
+            self.gui_config.sg_input_device = data.get("sg_input_device", "")
+            self.gui_config.sg_output_device = data.get("sg_output_device", "")
+            
             sg.theme("LightBlue3")
             layout = [
                 [
