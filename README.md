@@ -66,9 +66,9 @@ Choose one of the following methods.
 ```bash
 pip install torch torchvision torchaudio
 ```
-2. For Windows + Nvidia Ampere architecture (RTX30xx), based on issue #21, you need to specify the PyTorch CUDA version
+2. For Windows + Nvidia Ampere architecture (RTX50xx), you need to specify the PyTorch CUDA version
 ```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu117
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
 3. Install dependencies according to your graphics card
 - NVIDIA
