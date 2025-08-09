@@ -137,5 +137,14 @@
     "性别因子/声线粗细": "Gender Factor/Voice Thickness",
     "窗函数类型": "Window Function Type",
     "SOLA搜索倍数": "SOLA Search Multiplier",
-    "交叉淡化比例": "Crossfade Balance"
+    "交叉淡化比例": "Crossfade Balance",
+    "GPU优化设置": "GPU Optimization Settings",
+    "启用混合精度(AMP)": "Enable Mixed Precision (AMP)",
+    "GPU内存优化": "GPU Memory Optimization",
+    "音高批处理大小": "Pitch Batch Size",
+    "启用音高平滑": "Enable Pitch Smoothing",
+    "平滑窗口": "Smoothing Window",
+    "特征缓冲倍数": "Feature Buffer Multiplier",
+    "共振峰保留": "Formant Preservation",
+    "谐波增强": "Harmonic Enhancement"
 }

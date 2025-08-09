@@ -2,7 +2,6 @@ from io import BytesIO
 import os
 import sys
 import traceback
-from infer.lib import jit
 from infer.lib.jit.get_synthesizer import get_synthesizer
 from time import time as ttime
 import fairseq
@@ -41,7 +40,6 @@ class RVC:
     def __init__(
         self,
         key,
-        formant,
         pth_path,
         index_path,
         index_rate,
@@ -50,12 +48,13 @@ class RVC:
         opt_q,
         config: Config,
         last_rvc=None,
+        gui_config=None,
     ) -> None:
         """
         初始化
         """
         try:
-            if config.dml == True:
+            if config and hasattr(config, 'dml') and config.dml == True:
 
                 def forward_dml(ctx, x, scale):
                     ctx.scale = scale
@@ -65,19 +64,20 @@ class RVC:
                 fairseq.modules.grad_multiply.GradMultiply.forward = forward_dml
             # global config
             self.config = config
+            self.gui_config = gui_config  # Store GUI config for optimizations
             self.inp_q = inp_q
             self.opt_q = opt_q
             # device="cpu"########强制cpu测试
-            self.device = config.device
+            self.device = config.device if config else torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.f0_up_key = key
-            self.formant_shift = formant
+            self.formant_shift = gui_config.formant if gui_config and hasattr(gui_config, 'formant') else 0
             self.f0_min = 50
             self.f0_max = 1100
             self.f0_mel_min = 1127 * np.log(1 + self.f0_min / 700)
             self.f0_mel_max = 1127 * np.log(1 + self.f0_max / 700)
             self.n_cpu = n_cpu
-            self.use_jit = self.config.use_jit
-            self.is_half = config.is_half
+            self.use_jit = False  # JIT disabled - causes more issues than benefits
+            self.is_half = config.is_half if config else False
 
             if index_rate != 0:
                 self.index = faiss.read_index(index_path)
@@ -124,50 +124,10 @@ class RVC:
                 else:
                     self.net_g = self.net_g.float()
 
-            def set_jit_model():
-                jit_pth_path = self.pth_path.rstrip(".pth")
-                jit_pth_path += ".half.jit" if self.is_half else ".jit"
-                reload = False
-                if str(self.device) == "cuda":
-                    self.device = torch.device("cuda:0")
-                if os.path.exists(jit_pth_path):
-                    cpt = jit.load(jit_pth_path)
-                    model_device = cpt["device"]
-                    if model_device != str(self.device):
-                        reload = True
-                else:
-                    reload = True
-
-                if reload:
-                    cpt = jit.synthesizer_jit_export(
-                        self.pth_path,
-                        "script",
-                        None,
-                        device=self.device,
-                        is_half=self.is_half,
-                    )
-
-                self.tgt_sr = cpt["config"][-1]
-                self.if_f0 = cpt.get("f0", 1)
-                self.version = cpt.get("version", "v1")
-                self.net_g = torch.jit.load(
-                    BytesIO(cpt["model"]), map_location=self.device
-                )
-                self.net_g.infer = self.net_g.forward
-                self.net_g.eval().to(self.device)
-
+            # JIT removed - causes more issues than benefits
             def set_synthesizer():
-                if self.use_jit and not config.dml:
-                    if self.is_half and "cpu" in str(self.device):
-                        printt(
-                            "Use default Synthesizer model. \
-                                    Jit is not supported on the CPU for half floating point"
-                        )
-                        set_default_model()
-                    else:
-                        set_jit_model()
-                else:
-                    set_default_model()
+                # Always use default model - JIT causes more issues than benefits
+                set_default_model()
 
             if last_rvc is None or last_rvc.pth_path != self.pth_path:
                 set_synthesizer()
@@ -176,10 +136,7 @@ class RVC:
                 self.if_f0 = last_rvc.if_f0
                 self.version = last_rvc.version
                 self.is_half = last_rvc.is_half
-                if last_rvc.use_jit != self.use_jit:
-                    set_synthesizer()
-                else:
-                    self.net_g = last_rvc.net_g
+                self.net_g = last_rvc.net_g
 
             if last_rvc is not None and hasattr(last_rvc, "model_rmvpe"):
                 self.model_rmvpe = last_rvc.model_rmvpe
@@ -188,6 +145,7 @@ class RVC:
                 self.model_fcpe = last_rvc.model_fcpe
         except:
             printt(traceback.format_exc())
+            raise  # Re-raise the exception - don't hide failures
 
     def change_key(self, new_key):
         self.f0_up_key = new_key
@@ -206,6 +164,24 @@ class RVC:
         if not torch.is_tensor(f0):
             f0 = torch.from_numpy(f0)
         f0 = f0.float().to(self.device).squeeze()
+        
+        # Apply pitch smoothing if enabled
+        if self.gui_config and hasattr(self.gui_config, 'pitch_smoothing') and self.gui_config.pitch_smoothing:
+            try:
+                from scipy.signal import savgol_filter
+                window = min(int(self.gui_config.pitch_smooth_window), len(f0) - 1) if hasattr(self.gui_config, 'pitch_smooth_window') else 5
+                if window > 2 and window % 2 == 0:
+                    window -= 1  # Make sure window is odd
+                if window > 2:
+                    f0_np = f0.cpu().numpy()
+                    # Only smooth non-zero values
+                    voiced = f0_np > 0
+                    if voiced.any():
+                        f0_np[voiced] = savgol_filter(f0_np[voiced], window, 2)
+                    f0 = torch.from_numpy(f0_np).to(self.device)
+            except:
+                pass  # If smoothing fails, continue with original
+        
         f0_mel = 1127 * torch.log(1 + f0 / 700)
         f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - self.f0_mel_min) * 254 / (
             self.f0_mel_max - self.f0_mel_min
@@ -292,6 +268,8 @@ class RVC:
         ):  ###不支持dml，cpu又太慢用不成，拿fcpe顶替
             return self.get_f0(x, f0_up_key, 1, "fcpe")
         # printt("using crepe,device:%s"%self.device)
+        # Use configurable batch size from GUI config (ensure it's an integer)
+        batch_size = int(self.gui_config.pitch_batch_size) if self.gui_config and hasattr(self.gui_config, 'pitch_batch_size') else 512
         f0, pd = torchcrepe.predict(
             x.unsqueeze(0).float(),
             16000,
@@ -299,7 +277,7 @@ class RVC:
             self.f0_min,
             self.f0_max,
             "full",
-            batch_size=512,
+            batch_size=batch_size,
             # device=self.device if self.device.type!="privateuseone" else "cpu",###crepe不用半精度全部是全精度所以不愁###cpu延迟高到没法用
             device=self.device,
             return_periodicity=True,
@@ -352,9 +330,19 @@ class RVC:
         return_length,
         f0method,
     ) -> np.ndarray:
+        # Check if model is loaded
+        if self.net_g is None:
+            printt("Model not loaded, returning silence")
+            return np.zeros(return_length, dtype=np.float32)
+            
         t1 = ttime()
+        
+        # Use AMP if enabled and supported
+        use_amp = (self.gui_config and hasattr(self.gui_config, 'use_amp') and self.gui_config.use_amp and 
+                   torch.cuda.is_available() and "cpu" not in str(self.device))
+        
         with torch.no_grad():
-            if self.config.is_half:
+            if hasattr(self, 'config') and self.config and hasattr(self.config, 'is_half') and self.config.is_half:
                 feats = input_wav.half().view(1, -1)
             else:
                 feats = input_wav.float().view(1, -1)
@@ -380,7 +368,7 @@ class RVC:
                     npy = np.sum(
                         self.big_npy[ix] * np.expand_dims(weight, axis=2), axis=1
                     )
-                    if self.config.is_half:
+                    if hasattr(self, 'config') and self.config and hasattr(self.config, 'is_half') and self.config.is_half:
                         npy = npy.astype("float16")
                     feats[0][skip_head // 2 :] = (
                         torch.from_numpy(npy).unsqueeze(0).to(self.device)
@@ -423,21 +411,40 @@ class RVC:
         return_length2 = torch.LongTensor([return_length2])
         return_length = torch.LongTensor([return_length])
         with torch.no_grad():
-            if self.if_f0 == 1:
-                infered_audio, _, _ = self.net_g.infer(
-                    feats,
-                    p_len,
-                    cache_pitch,
-                    cache_pitchf,
-                    sid,
-                    skip_head,
-                    return_length,
-                    return_length2,
-                )
+            # Apply AMP context if enabled
+            if use_amp:
+                with torch.cuda.amp.autocast(dtype=torch.float16):
+                    if self.if_f0 == 1:
+                        infered_audio, _, _ = self.net_g.infer(
+                            feats,
+                            p_len,
+                            cache_pitch,
+                            cache_pitchf,
+                            sid,
+                            skip_head,
+                            return_length,
+                            return_length2,
+                        )
+                    else:
+                        infered_audio, _, _ = self.net_g.infer(
+                            feats, p_len, sid, skip_head, return_length, return_length2
+                        )
             else:
-                infered_audio, _, _ = self.net_g.infer(
-                    feats, p_len, sid, skip_head, return_length, return_length2
-                )
+                if self.if_f0 == 1:
+                    infered_audio, _, _ = self.net_g.infer(
+                        feats,
+                        p_len,
+                        cache_pitch,
+                        cache_pitchf,
+                        sid,
+                        skip_head,
+                        return_length,
+                        return_length2,
+                    )
+                else:
+                    infered_audio, _, _ = self.net_g.infer(
+                        feats, p_len, sid, skip_head, return_length, return_length2
+                    )
         infered_audio = infered_audio.squeeze(1).float()
         upp_res = int(np.floor(factor * self.tgt_sr // 100))
         if upp_res != self.tgt_sr // 100:

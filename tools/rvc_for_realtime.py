@@ -56,6 +56,7 @@ class RVC:
         opt_q,
         config: Config,
         last_rvc=None,
+        gui_config=None,
     ) -> None:
         """
         初始化
@@ -71,6 +72,7 @@ class RVC:
                 fairseq.modules.grad_multiply.GradMultiply.forward = forward_dml
             # global config
             self.config = config
+            self.gui_config = gui_config  # Store GUI config for optimizations
             self.inp_q = inp_q
             self.opt_q = opt_q
             # device="cpu"########强制cpu测试
@@ -206,6 +208,21 @@ class RVC:
         if not torch.is_tensor(f0):
             f0 = torch.from_numpy(f0)
         f0 = f0.float().to(self.device).squeeze()
+        
+        # Apply pitch smoothing if enabled
+        if self.gui_config and self.gui_config.pitch_smoothing:
+            from scipy.signal import savgol_filter
+            window = min(self.gui_config.pitch_smooth_window, len(f0) - 1)
+            if window > 2 and window % 2 == 0:
+                window -= 1  # Make sure window is odd
+            if window > 2:
+                f0_np = f0.cpu().numpy()
+                # Only smooth non-zero values
+                voiced = f0_np > 0
+                if voiced.any():
+                    f0_np[voiced] = savgol_filter(f0_np[voiced], window, 2)
+                f0 = torch.from_numpy(f0_np).to(self.device)
+        
         f0_mel = 1127 * torch.log(1 + f0 / 700)
         f0_mel[f0_mel > 0] = (f0_mel[f0_mel > 0] - self.f0_mel_min) * 254 / (
             self.f0_mel_max - self.f0_mel_min
@@ -292,6 +309,8 @@ class RVC:
         ):  ###不支持dml，cpu又太慢用不成，拿fcpe顶替
             return self.get_f0(x, f0_up_key, 1, "fcpe")
         # printt("using crepe,device:%s"%self.device)
+        # Use configurable batch size from GUI config
+        batch_size = self.gui_config.pitch_batch_size if self.gui_config else 512
         f0, pd = torchcrepe.predict(
             x.unsqueeze(0).float(),
             16000,
@@ -299,7 +318,7 @@ class RVC:
             self.f0_min,
             self.f0_max,
             "full",
-            batch_size=512,
+            batch_size=batch_size,
             # device=self.device if self.device.type!="privateuseone" else "cpu",###crepe不用半精度全部是全精度所以不愁###cpu延迟高到没法用
             device=self.device,
             return_periodicity=True,
@@ -353,6 +372,15 @@ class RVC:
         f0method,
     ) -> np.ndarray:
         t1 = ttime()
+        
+        # Use AMP if enabled and supported
+        use_amp = (self.gui_config and self.gui_config.use_amp and 
+                   torch.cuda.is_available() and 
+                   "cpu" not in str(self.device))
+        
+        # Feature buffer multiplier for larger lookahead
+        buffer_mult = self.gui_config.feature_buffer_mult if self.gui_config else 1.0
+        
         with torch.no_grad():
             if self.config.is_half:
                 feats = input_wav.half().view(1, -1)
@@ -420,20 +448,38 @@ class RVC:
         skip_head = torch.LongTensor([skip_head])
         return_length = torch.LongTensor([return_length])
         with torch.no_grad():
-            if self.if_f0 == 1:
-                infered_audio, _, _ = self.net_g.infer(
-                    feats,
-                    p_len,
-                    cache_pitch,
-                    cache_pitchf,
-                    sid,
-                    skip_head,
-                    return_length,
-                )
+            # Apply AMP context if enabled
+            if use_amp:
+                with torch.cuda.amp.autocast(dtype=torch.float16):
+                    if self.if_f0 == 1:
+                        infered_audio, _, _ = self.net_g.infer(
+                            feats,
+                            p_len,
+                            cache_pitch,
+                            cache_pitchf,
+                            sid,
+                            skip_head,
+                            return_length,
+                        )
+                    else:
+                        infered_audio, _, _ = self.net_g.infer(
+                            feats, p_len, sid, skip_head, return_length
+                        )
             else:
-                infered_audio, _, _ = self.net_g.infer(
-                    feats, p_len, sid, skip_head, return_length
-                )
+                if self.if_f0 == 1:
+                    infered_audio, _, _ = self.net_g.infer(
+                        feats,
+                        p_len,
+                        cache_pitch,
+                        cache_pitchf,
+                        sid,
+                        skip_head,
+                        return_length,
+                    )
+                else:
+                    infered_audio, _, _ = self.net_g.infer(
+                        feats, p_len, sid, skip_head, return_length
+                    )
         t5 = ttime()
         printt(
             "Spent time: fea = %.3fs, index = %.3fs, f0 = %.3fs, model = %.3fs",

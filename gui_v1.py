@@ -176,6 +176,12 @@ if __name__ == "__main__":
             self.window_func: str = "cosine"  # cosine (best), sine_squared, hann, tukey
             self.sola_search_mult: float = 1.0  # 0.5 to 2.0
             self.crossfade_ratio: float = 0.5  # 0.3 to 0.7
+            # GPU optimization settings
+            self.use_amp: bool = False  # Automatic Mixed Precision
+            self.pitch_batch_size: int = 512  # Batch size for pitch extraction
+            self.pitch_smoothing: bool = False  # Enable pitch smoothing
+            self.pitch_smooth_window: int = 5  # Smoothing window size
+            self.gpu_optimize: bool = False  # GPU memory optimization
 
     class GUI:
         def __init__(self) -> None:
@@ -290,6 +296,12 @@ if __name__ == "__main__":
             self.gui_config.window_func = data.get("window_func", "cosine")
             self.gui_config.sola_search_mult = data.get("sola_search_mult", 1.0)
             self.gui_config.crossfade_ratio = data.get("crossfade_ratio", 0.5)
+            # Load GPU optimization settings
+            self.gui_config.use_amp = data.get("use_amp", False)
+            self.gui_config.pitch_batch_size = data.get("pitch_batch_size", 512)
+            self.gui_config.pitch_smoothing = data.get("pitch_smoothing", False)
+            self.gui_config.pitch_smooth_window = data.get("pitch_smooth_window", 5)
+            self.gui_config.gpu_optimize = data.get("gpu_optimize", False)
             
             sg.theme("LightBlue3")
             layout = [
@@ -590,16 +602,58 @@ if __name__ == "__main__":
                                     default=data.get("use_pv", False),
                                     enable_events=True,
                                 ),
-                                # sg.Checkbox(
-                                #     "JIT加速",
-                                #     default=self.config.use_jit,
-                                #     key="use_jit",
-                                #     enable_events=False,
-                                # ),
                             ],
-                            # [sg.Text("注：首次使用JIT加速时，会出现卡顿，\n      并伴随一些噪音，但这是正常现象！")],
                         ],
                         title=i18n("性能设置"),
+                    ),
+                ],
+                [
+                    sg.Frame(
+                        title=i18n("GPU优化设置"),
+                        layout=[
+                            [
+                                sg.Checkbox(
+                                    i18n("启用混合精度(AMP)"),
+                                    key="use_amp",
+                                    default=data.get("use_amp", False),
+                                    enable_events=True,
+                                ),
+                                sg.Checkbox(
+                                    i18n("GPU内存优化"),
+                                    key="gpu_optimize",
+                                    default=data.get("gpu_optimize", False),
+                                    enable_events=True,
+                                ),
+                            ],
+                            [
+                                sg.Text(i18n("音高批处理大小")),
+                                sg.Slider(
+                                    range=(256, 2048),
+                                    key="pitch_batch_size",
+                                    resolution=128,
+                                    orientation="h",
+                                    default_value=data.get("pitch_batch_size", 512),
+                                    enable_events=True,
+                                ),
+                            ],
+                            [
+                                sg.Checkbox(
+                                    i18n("启用音高平滑"),
+                                    key="pitch_smoothing",
+                                    default=data.get("pitch_smoothing", False),
+                                    enable_events=True,
+                                ),
+                                sg.Text(i18n("平滑窗口")),
+                                sg.Slider(
+                                    range=(3, 15),
+                                    key="pitch_smooth_window",
+                                    resolution=2,
+                                    orientation="h",
+                                    default_value=data.get("pitch_smooth_window", 5),
+                                    enable_events=True,
+                                ),
+                            ],
+                        ],
                     ),
                 ],
                 [
@@ -684,8 +738,6 @@ if __name__ == "__main__":
                             "crossfade_length": values["crossfade_length"],
                             "extra_time": values["extra_time"],
                             "n_cpu": values["n_cpu"],
-                            # "use_jit": values["use_jit"],
-                            "use_jit": False,
                             "use_pv": values["use_pv"],
                             "f0method": ["pm", "harvest", "crepe", "rmvpe", "fcpe"][
                                 [
@@ -700,6 +752,12 @@ if __name__ == "__main__":
                             "window_func": values["window_func"],
                             "sola_search_mult": values["sola_search_mult"],
                             "crossfade_ratio": values["crossfade_ratio"],
+                            # GPU optimization settings
+                            "use_amp": values["use_amp"],
+                            "pitch_batch_size": values["pitch_batch_size"],
+                            "pitch_smoothing": values["pitch_smoothing"],
+                            "pitch_smooth_window": values["pitch_smooth_window"],
+                            "gpu_optimize": values["gpu_optimize"],
                         }
                         with open("configs/inuse/config.json", "w") as j:
                             json.dump(settings, j)
@@ -808,13 +866,28 @@ if __name__ == "__main__":
             self.gui_config.window_func = values["window_func"]
             self.gui_config.sola_search_mult = values["sola_search_mult"]
             self.gui_config.crossfade_ratio = values["crossfade_ratio"]
+            # Set GPU optimization settings
+            self.gui_config.use_amp = values["use_amp"]
+            self.gui_config.pitch_batch_size = values["pitch_batch_size"]
+            self.gui_config.pitch_smoothing = values["pitch_smoothing"]
+            self.gui_config.pitch_smooth_window = values["pitch_smooth_window"]
+            self.gui_config.gpu_optimize = values["gpu_optimize"]
             return True
 
         def start_vc(self):
             torch.cuda.empty_cache()
+            
+            # GPU memory optimization if enabled
+            if self.gui_config.gpu_optimize and torch.cuda.is_available():
+                # Set memory fraction for better allocation
+                torch.cuda.set_per_process_memory_fraction(0.95)
+                # Enable cudnn benchmarking for optimal kernels
+                torch.backends.cudnn.benchmark = True
+                # Pre-allocate pinned memory for faster transfers
+                torch.cuda.synchronize()
+            
             self.rvc = rvc_for_realtime.RVC(
                 self.gui_config.pitch,
-                self.gui_config.formant,
                 self.gui_config.pth_path,
                 self.gui_config.index_path,
                 self.gui_config.index_rate,
@@ -823,6 +896,7 @@ if __name__ == "__main__":
                 opt_q,
                 self.config,
                 self.rvc if hasattr(self, "rvc") else None,
+                self.gui_config,  # Pass gui_config for GPU optimizations
             )
             self.gui_config.samplerate = (
                 self.rvc.tgt_sr
